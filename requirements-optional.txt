@@ -1,0 +1,9 @@
+# Optional extras — the pipeline runs fully without these.
+
+# Cross-validation of our from-scratch miners against a reference
+# implementation (used by tests/test_reference_parity.py, skipped if absent).
+mlxtend>=0.23
+
+# Distributed reference architecture (src/mba/scaling/spark_fpgrowth.py).
+# Requires a working JVM (Java 8/11/17).
+pyspark>=3.4

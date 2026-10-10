@@ -1,0 +1,15 @@
+# Theme tokens mirror src/mba/viz/theme.py so the dashboard and the static
+# report figures are visibly one system.
+[theme]
+base = "dark"
+primaryColor = "#3987e5"
+backgroundColor = "#0d0d0d"
+secondaryBackgroundColor = "#1a1a19"
+textColor = "#f0efec"
+font = "sans serif"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false

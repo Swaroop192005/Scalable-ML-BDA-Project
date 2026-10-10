@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scalable-mba"
+version = "1.0.0"
+description = "Scalable Market Basket Analysis — association rule mining at retail scale"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "pandas>=2.0",
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pyarrow>=12.0",
+    "PyYAML>=6.0",
+    "tqdm>=4.65",
+    "networkx>=3.0",
+    "matplotlib>=3.7",
+    "seaborn>=0.12",
+    "plotly>=5.14",
+    "streamlit>=1.28",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+spark = ["pyspark>=3.4"]
+reference = ["mlxtend>=0.23"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1"]
+
+[project.scripts]
+mba = "mba.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q --strict-markers"
+markers = [
+    "slow: marks tests that run the full dataset (deselect with '-m \"not slow\"')",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

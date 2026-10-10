@@ -1,0 +1,26 @@
+# Core data stack
+pandas>=2.0
+numpy>=1.24
+scipy>=1.10
+pyarrow>=12.0          # Parquet I/O for processed artifacts
+
+# Configuration & CLI
+PyYAML>=6.0
+tqdm>=4.65
+
+# Analytics & graph
+networkx>=3.0
+
+# Visualisation
+matplotlib>=3.7
+seaborn>=0.12
+plotly>=5.14
+
+# Dashboard
+streamlit>=1.28
+
+# Excel source file support (UCI Online Retail ships as .xlsx)
+openpyxl>=3.1
+
+# Testing
+pytest>=7.4

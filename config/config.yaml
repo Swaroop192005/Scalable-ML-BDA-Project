@@ -1,0 +1,164 @@
+# ==========================================================================
+# Scalable Market Basket Analysis — master configuration
+#
+# Every stage of the pipeline reads its parameters from this file. Nothing
+# in src/ hard-codes a threshold, a path or a column name; override any key
+# on the command line with  --set a.b.c=value  (see `mba --help`).
+# ==========================================================================
+
+project:
+  name: "Scalable Market Basket Analysis"
+  random_seed: 42
+
+paths:
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  sample_dir: "data/sample"
+  reports_dir: "reports"
+  figures_dir: "reports/figures"
+  # Source file. The loader accepts .xlsx, .csv and .parquet and picks the
+  # first of these that exists, so either form of the UCI download works.
+  raw_file: "data/raw/online_retail.csv"
+  raw_file_fallbacks:
+    - "data/raw/Online Retail.xlsx"
+    - "data/raw/online_retail.parquet"
+    - "data/sample/sample_retail.csv"
+
+schema:
+  invoice_col: "InvoiceNo"
+  item_col: "Description"        # human-readable item key used in rules
+  stock_code_col: "StockCode"
+  quantity_col: "Quantity"
+  date_col: "InvoiceDate"
+  price_col: "UnitPrice"
+  customer_col: "CustomerID"
+  country_col: "Country"
+
+preprocess:
+  drop_cancellations: true        # InvoiceNo starting with 'C'
+  cancellation_prefix: "C"
+  drop_missing_description: true
+  drop_missing_customer: false    # guest checkouts still form valid baskets
+  min_quantity: 1                 # strictly positive quantities only
+  min_unit_price: 0.001           # removes £0.00 adjustment/debt lines
+  drop_duplicate_lines: true
+  # StockCodes that are postage, fees, samples, manual adjustments etc.
+  # Matched case-insensitively against the whole code.
+  non_product_codes:
+    - "POST"
+    - "DOT"
+    - "C2"
+    - "M"
+    - "BANK CHARGES"
+    - "AMAZONFEE"
+    - "S"
+    - "CRUK"
+    - "PADS"
+    - "B"
+    - "D"
+  # Description text that marks a non-product line regardless of code.
+  non_product_description_patterns:
+    - "^\\?+$"
+    - "check"
+    - "damaged"
+    - "lost"
+    - "found"
+    - "smashed"
+    - "wet.*rusty"
+    - "throw away"
+    - "adjustment"
+    - "mailout"
+    - "amazon"
+    - "sold as set"
+    - "wrongly"
+    - "missing"
+    - "incorrect"
+    - "test"
+    - "dotcom"
+    - "^manual$"
+    - "^postage$"
+    - "^carriage$"
+    - "^bank charges$"
+  min_basket_size: 2              # a 1-item invoice carries no association
+  max_basket_size: 200            # guards against wholesale mega-invoices
+
+basket:
+  dtype: "bool"                   # bool keeps the sparse matrix at 1 byte/nnz
+  min_item_support_count: 5       # prune ultra-rare items before encoding
+
+mining:
+  algorithm: "fpgrowth"           # apriori | fpgrowth
+  min_support: 0.02               # fraction of baskets
+  min_confidence: 0.30
+  min_lift: 1.20
+  max_len: 3                      # maximum itemset cardinality
+  metrics:                        # rule metrics to compute
+    - support
+    - confidence
+    - lift
+    - leverage
+    - conviction
+    - zhangs_metric
+  sort_by: "lift"
+  top_n_rules: 200
+
+spurious:
+  # A rule is flagged when it clears the thresholds but is statistically or
+  # commercially uninteresting. See src/mba/mining/spurious.py.
+  min_antecedent_support: 0.01
+  max_consequent_support: 0.60    # near-ubiquitous consequents inflate nothing
+  min_leverage: 0.0005
+  min_zhangs_metric: 0.10
+  min_chi2_p_value: 0.05          # independence test significance level
+  min_rule_count: 20              # absolute basket count behind the rule
+
+scaling:
+  benchmark:
+    support_grid: [0.05, 0.04, 0.03, 0.02, 0.015, 0.01]
+    algorithms: ["apriori", "fpgrowth"]
+    repeats: 1
+    max_len: 3
+  out_of_core:
+    chunk_size: 50000             # transactions held in memory per chunk
+    memory_budget_mb: 800
+    # SON scales local support up to avoid missing globally frequent sets.
+    local_support_scale: 1.0
+  spark:
+    app_name: "mba-fpgrowth"
+    master: "local[*]"
+    shuffle_partitions: 8
+    min_support: 0.02
+    min_confidence: 0.30
+
+analytics:
+  eda:
+    top_n_products: 15
+    top_n_countries: 12
+  network:
+    top_n_items: 40               # nodes in the co-occurrence graph
+    min_edge_weight: 0.01         # lift-normalised edge threshold
+    layout: "spring"
+    community_detection: true
+  regional:
+    min_transactions: 150         # countries below this are skipped
+    top_n_countries: 8
+    min_support: 0.03             # regions are smaller — relax support
+    min_confidence: 0.30
+  insights:
+    top_n: 12
+    min_lift_for_bundle: 1.5
+    min_confidence_for_placement: 0.5
+
+viz:
+  style: "seaborn-v0_8-darkgrid"
+  palette: "viridis"
+  dpi: 130
+  figsize: [11, 6]
+  save_format: "png"
+
+dashboard:
+  title: "Scalable Market Basket Analysis"
+  page_icon: "🛒"
+  layout: "wide"
+  max_rules_displayed: 500
+  default_country: "All Countries"
