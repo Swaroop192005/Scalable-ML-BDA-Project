@@ -144,6 +144,39 @@ analytics:
     top_n_countries: 8
     min_support: 0.03             # regions are smaller — relax support
     min_confidence: 0.30
+  segmentation:
+    k: 4                          # business-readable segment count
+    min_support: 0.02             # a segment holds a fraction of the baskets,
+                                  # so the global threshold returns nothing
+    min_confidence: 0.30
+    min_segment_size: 50          # baskets below this are not worth mining
+    k_grid: [2, 3, 4, 5, 6, 7, 8] # swept by `mba segment --choose-k`
+
+  temporal:
+    freq: "M"                     # resample period: M, W or Q
+    min_periods: 3                # periods a rule must appear in to classify
+    min_support: 0.03             # a single month is ~1/12 of the data
+    min_confidence: 0.30
+    trend_threshold: 0.30         # relative slope marking emerging/decaying
+    trend_r2: 0.50                # the linear fit must also explain the
+                                  # variation, or an oscillating rule reads
+                                  # as "emerging" purely for ending high
+    seasonal_cv: 0.60             # coeff. of variation marking a seasonal rule.
+                                  # On this dataset nothing reaches it: the
+                                  # highest observed lift CV is 0.32, so no rule
+                                  # is classed seasonal. That is a finding, not
+                                  # a mis-set threshold — basket *volume* is
+                                  # strongly seasonal here but product
+                                  # *affinities* are not. Do not lower it to
+                                  # manufacture seasonal labels.
+
+  recommend:
+    test_fraction: 0.25
+    k_values: [1, 5, 10]
+    min_support: 0.005            # rules are mined on the training split only
+    max_len: 3
+    strategy: "weighted"
+
   insights:
     top_n: 12
     min_lift_for_bundle: 1.5

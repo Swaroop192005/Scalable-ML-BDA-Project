@@ -23,8 +23,10 @@ recurring failure modes so a reader can tell the two apart:
 
 ``not_significant``
     A chi-squared test of independence on the 2x2 contingency table fails to
-    reject independence at the configured level — the pattern is compatible
-    with chance.
+    reject independence — the pattern is compatible with chance. The test is
+    **Benjamini-Hochberg corrected across every rule in the table**, because
+    testing hundreds of rules at p < 0.05 would otherwise produce a
+    predictable crop of false positives.
 
 ``redundant``
     A more general rule (subset antecedent, same consequent) already achieves
@@ -60,6 +62,15 @@ _VARIANT_TOKENS = {
     "DESIGN", "VINTAGE", "RETROSPOT", "ASSORTED", "COLOUR", "COLOR",
 }
 _TOKEN_RE = re.compile(r"[^A-Z0-9]+")
+
+__all__ = [
+    "FLAG_COLUMNS",
+    "SpuriousFlags",
+    "benjamini_hochberg",
+    "chi2_independence",
+    "flag_spurious_rules",
+    "high_value_rules",
+]
 
 FLAG_COLUMNS = [
     "rare_pair",
@@ -134,6 +145,41 @@ def chi2_independence(
     chi2 = np.nan_to_num(chi2, nan=0.0, posinf=0.0)
     p_value = erfc(np.sqrt(np.maximum(chi2, 0.0) / 2.0))
     return chi2, p_value
+
+
+def benjamini_hochberg(p_values: np.ndarray) -> np.ndarray:
+    """Benjamini-Hochberg adjusted p-values (q-values), controlling the FDR.
+
+    Rule mining is mass hypothesis testing. Testing 500 rules at p < 0.05
+    means ~25 of them clear the bar by chance alone, so an uncorrected
+    per-rule test does not mean what it appears to. Bonferroni would fix
+    that but is far too conservative here — the tests are positively
+    dependent (rules share items) and it would discard most true findings.
+
+    Benjamini-Hochberg instead controls the *false discovery rate*: the
+    expected share of false positives **among the rules declared
+    significant**. For p-values sorted ascending with ranks i = 1..m::
+
+        q(i) = min over k >= i of  ( p(k) * m / k )
+
+    The running minimum from the largest rank downward enforces
+    monotonicity, so a rule is never reported as more significant than a
+    worse-ranked one. Returned q-values are clipped to 1.
+    """
+    p = np.asarray(p_values, dtype="float64")
+    m = p.size
+    if m == 0:
+        return p.copy()
+
+    order = np.argsort(p)
+    ranked = p[order]
+    # p * m / i, then the running minimum from the tail back to the head.
+    scaled = ranked * m / np.arange(1, m + 1)
+    q_sorted = np.minimum.accumulate(scaled[::-1])[::-1]
+
+    q = np.empty_like(q_sorted)
+    q[order] = np.clip(q_sorted, 0.0, 1.0)
+    return q
 
 
 def _normalised_tokens(items: frozenset) -> frozenset:
@@ -235,6 +281,8 @@ def flag_spurious_rules(
     )
     out["chi2"] = chi2
     out["chi2_p_value"] = p_value
+    # Adjust for the fact that every rule in this table was tested.
+    out["chi2_q_value"] = benjamini_hochberg(p_value)
     out["variant_overlap"] = _variant_overlap(out["antecedents"], out["consequents"])
 
     # -- individual flags ------------------------------------------------
@@ -252,7 +300,9 @@ def flag_spurious_rules(
         if "zhangs_metric" in out.columns
         else False
     )
-    out["not_significant"] = out["chi2_p_value"] > params["min_chi2_p_value"]
+    # Flag on the FDR-adjusted q-value, not the raw p-value: with hundreds
+    # of rules tested at once, the raw p-value overstates significance.
+    out["not_significant"] = out["chi2_q_value"] > params["min_chi2_p_value"]
     out["redundant"] = _redundancy_mask(out)
     out["self_referential"] = out["variant_overlap"] >= params["max_variant_overlap"]
 

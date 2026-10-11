@@ -213,3 +213,70 @@ def test_triage_on_empty_rules(cfg):
 
     annotated, flags = flag_spurious_rules(empty_rules_frame(), cfg)
     assert annotated.empty and flags.n_rules == 0
+
+
+# --------------------------------------------- multiple-testing correction
+def test_bh_matches_the_textbook_example():
+    """Benjamini & Hochberg's own 1995 worked example."""
+    from mba.mining.spurious import benjamini_hochberg
+
+    p = np.array([0.001, 0.008, 0.039, 0.041, 0.042, 0.060, 0.074, 0.205, 0.212, 0.216])
+    q = benjamini_hochberg(p)
+    expected = np.array([0.010, 0.040, 0.084, 0.084, 0.084, 0.100, 0.1057,
+                         0.216, 0.216, 0.216])
+    assert q == pytest.approx(expected, abs=1e-3)
+
+
+def test_bh_q_values_never_fall_below_p_values():
+    from mba.mining.spurious import benjamini_hochberg
+
+    rng = np.random.default_rng(0)
+    p = rng.random(500)
+    assert (benjamini_hochberg(p) >= p - 1e-12).all()
+
+
+def test_bh_is_monotone_in_p():
+    """A worse-ranked p-value must never get a better q-value."""
+    from mba.mining.spurious import benjamini_hochberg
+
+    rng = np.random.default_rng(1)
+    p = np.sort(rng.random(200))
+    q = benjamini_hochberg(p)
+    assert (np.diff(q) >= -1e-12).all()
+
+
+def test_bh_is_order_invariant():
+    from mba.mining.spurious import benjamini_hochberg
+
+    rng = np.random.default_rng(2)
+    p = rng.random(100)
+    order = rng.permutation(100)
+    shuffled = benjamini_hochberg(p[order])
+    assert benjamini_hochberg(p)[order] == pytest.approx(shuffled)
+
+
+def test_bh_clips_to_one():
+    from mba.mining.spurious import benjamini_hochberg
+
+    assert (benjamini_hochberg(np.full(50, 0.99)) <= 1.0).all()
+
+
+def test_bh_handles_empty_input():
+    from mba.mining.spurious import benjamini_hochberg
+
+    assert len(benjamini_hochberg(np.array([]))) == 0
+
+
+def test_significance_flag_uses_the_corrected_q_value(toy_transactions, cfg):
+    """Testing hundreds of rules at p<0.05 would otherwise produce false positives."""
+    basket = baskets_from_transactions(toy_transactions * 30)
+    itemsets = fpgrowth(basket, min_support=0.05, max_len=3, track_memory=False)
+    rules = association_rules(itemsets, min_confidence=0.0, min_lift=0.0)
+    annotated, _ = flag_spurious_rules(rules, cfg, basket.n_transactions)
+
+    assert "chi2_q_value" in annotated.columns
+    assert (annotated["chi2_q_value"] >= annotated["chi2_p_value"] - 1e-12).all()
+    # The flag must follow the q-value, not the raw p-value.
+    threshold = cfg.get("spurious.min_chi2_p_value", 0.05)
+    expected = annotated["chi2_q_value"] > threshold
+    assert (annotated["not_significant"] == expected).all()

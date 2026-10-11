@@ -21,8 +21,10 @@ Analytics* course.
 | **Mining** | Apriori and FP-Growth, both implemented from scratch, verified against each other, a brute-force checker, and mlxtend |
 | **Rules** | Support, confidence, lift, leverage, conviction and Zhang's metric, plus a seven-check triage that separates real bundles from statistical artefacts |
 | **Scale** | Benchmark harness, SON out-of-core miner for data beyond RAM, and a PySpark PFP reference for the distributed case |
-| **Analytics** | EDA, NetworkX co-occurrence networks with community detection, per-country mining, automated insight generation |
-| **Delivery** | A CLI that runs the whole thing, a Streamlit dashboard that re-mines live, and a written report bundle |
+| **Prediction** | A rule-driven recommender scored on a **held-out future** — temporal split, leave-one-out, against popularity / co-occurrence / random baselines |
+| **Analytics** | EDA, NetworkX co-occurrence networks with community detection, per-country mining, RFM customer segmentation, temporal rule drift, automated insight generation |
+| **Statistics** | Six interestingness metrics, a seven-check quality triage, and Benjamini-Hochberg FDR correction across the whole rules table |
+| **Delivery** | A CLI that runs the whole thing, an 11-tab Streamlit dashboard that re-mines live, and a written report bundle |
 
 ---
 
@@ -174,6 +176,111 @@ The rules that survive triage are the actionable ones:
 | `WOODEN FRAME ANTIQUE WHITE` → `WOODEN PICTURE FRAME WHITE FINISH` | 2.8% | 57% | 10.0 | 0.025 |
 | `JUMBO BAG PINK POLKADOT` → `JUMBO BAG RED RETROSPOT` + `JUMBO STORAGE BAG SUKI` | 2.0% | 32% | 9.2 | 0.018 |
 
+### Do the rules predict anything?
+
+![Recommender evaluation](docs/images/dashboard_recommender.png)
+
+Mining proves a pattern existed. It does not prove the pattern predicts. The
+recommender is trained on 13,527 baskets up to 2011-10-11 and scored on
+4,471 leave-one-out cases from the two months that follow — a **temporal**
+split, because in production you only ever have the past. Rules are mined on
+the training split only.
+
+| model | hit@1 | hit@5 | hit@10 | MAP@5 | coverage | novelty | vs popularity |
+|---|---|---|---|---|---|---|---|
+| **association** | **6.13%** | **13.40%** | **17.69%** | **0.086** | 13.3% | 4.54 | **9.1×** |
+| cooccurrence | 2.82% | 8.52% | 12.66% | 0.049 | 54.2% | 9.65 | 5.8× |
+| popularity | 0.40% | 1.48% | 2.80% | 0.008 | 0.4% | 3.24 | 1.0× |
+| random | 0.02% | 0.13% | 0.38% | 0.001 | 99.7% | 8.87 | 0.09× |
+
+Two things matter more than the headline number.
+
+**Association beats raw co-occurrence by 1.6×.** That is the comparison that
+justifies the mining pipeline existing. If support thresholds, confidence and
+lift could not beat simply counting pairs, they would be cost without
+benefit.
+
+**It is also the narrowest model in the table** — 13.3% catalogue coverage
+against co-occurrence's 54.2%. It is accurate partly by concentrating on a
+well-trodden slice of the range. That is a real trade-off, not an
+unqualified win, and the evaluation reports it rather than burying it.
+
+### Customers do not shop alike
+
+![Customer segments](docs/images/dashboard_segments.png)
+
+RFM segmentation (k-means++, implemented from scratch) over 4,231 customers:
+
+| segment | customers | share | median spend | revenue share |
+|---|---|---|---|---|
+| champions | 684 | 16% | £3,652 | **64%** |
+| at risk | 1,148 | 27% | £1,332 | 24% |
+| loyal | 822 | 19% | £423 | 5% |
+| one-time buyers | 1,577 | 37% | £302 | 7% |
+
+**16% of customers produce 64% of revenue** — and they shop differently. The
+*loyal* segment's strongest rules are Christmas decorations; champions and
+one-time buyers are dominated by the Regency teacup range. A single global
+rules table averages that away.
+
+### Affinities are stable; volume is not
+
+Mining each month independently classifies 848 distinct rules:
+
+| stable | emerging | decaying | **seasonal** | intermittent | sporadic |
+|---|---|---|---|---|---|
+| 11 | 13 | 20 | **0** | 120 | 680 |
+
+**No rule is statistically seasonal.** The highest lift coefficient of
+variation is 0.32 against a 0.60 threshold — while basket volume swings from
+968 in January to 2,524 in November. Christmas changes *how much* people buy
+here, not *what goes with what*. The threshold was left alone rather than
+lowered to manufacture seasonal labels.
+
+### Statistics that survive the volume of hypotheses
+
+A chi-squared independence test runs per rule. Testing hundreds at p < 0.05
+means ~5% clear the bar by chance, so the raw flag does not mean what it
+appears to. The `not_significant` check now reads a **Benjamini-Hochberg**
+FDR-adjusted q-value, controlling the expected share of false positives
+among the rules declared significant. Bonferroni was rejected as far too
+conservative — the tests are positively dependent, since rules share items.
+
+### Compact representations, and where they do not help
+
+`maximal ⊆ closed ⊆ frequent`, always. Closed itemsets are lossless for
+support: every frequent itemset's exact count is recoverable from them.
+
+| dataset | frequent | closed | maximal |
+|---|---|---|---|
+| Online Retail @ 1.5% | 628 | **628** (1.0×) | 491 (1.3×) |
+| dense synthetic | 38 | **4** (9.5×) | 3 (12.7×) |
+
+Closure gives **zero compression** on the real data. Not a bug — the same
+code compresses 9.5× on dense input, and `mba compact --verify` confirms all
+628 supports are recoverable. Closure only collapses an itemset into a
+superset of *identical* support, which with thousands of products and
+24-item baskets essentially never happens. Compact representations are a
+dense-data technique, and quoting a ratio without naming the regime would
+mislead.
+
+### Streaming, with the guarantees checked
+
+Lossy Counting over the real data at 2% support, ε = 0.002:
+
+| guarantee | expected | observed |
+|---|---|---|
+| No false negatives | 0 | **0** |
+| Counts never overestimate | False | **False** |
+| Undercount ≤ ε·N | ≤ 36 | **18** |
+| Table within space bound | ≤ 42,882 | **2,676** |
+
+The classical `(1/ε)·log(ε·N)` space bound assumes *one item per
+observation*. A basket inserts ~24 at once, so the real table legitimately
+exceeds it (2,656 vs 1,792) and the applicable bound is the scaled one.
+Reporting the unscaled figure would have claimed a guarantee the algorithm
+does not give here, so both are exposed separately.
+
 ### Networks and regions
 
 ![Co-occurrence network](docs/images/cooccurrence_network.png)
@@ -209,8 +316,9 @@ reach 5.3× lift and do not clear the global threshold at all.
 mba dashboard
 ```
 
-Seven tabs — Overview, Rules, Network, Regions, Benchmark, Insights, Data
-quality. Every control **re-runs the miner**; nothing is filtered from a
+Eleven tabs — Overview, Rules, Network, Regions, Recommender, Segments,
+Drift, Benchmark, Streaming, Insights, Data quality. Every control
+**re-runs the miner**; nothing is filtered from a
 precomputed table. Streamlit caches on the parameter set, so a threshold you
 have already visited returns instantly while a new one actually re-mines.
 
@@ -232,24 +340,31 @@ src/mba/
     base.py                 shared result types and the miner registry
     apriori.py              level-wise generate / prune / count
     fpgrowth.py             FP-tree, conditional pattern bases, recursion
+    compact.py              maximal and closed itemsets
     rules.py                rule generation and the six metrics
-    spurious.py             seven-check quality triage
+    spurious.py             seven-check triage + Benjamini-Hochberg FDR
   scaling/
     benchmark.py            the support sweep and scaling curve
     outofcore.py            SON two-pass streaming miner
+    streaming.py            Lossy Counting, single pass, bounded memory
     spark_fpgrowth.py       distributed PFP reference architecture
   analytics/
     eda.py                  descriptive tables
     network.py              co-occurrence graphs, communities, centrality
     regional.py             per-country mining and divergence
+    segmentation.py         RFM + k-means (from scratch), per-segment rules
+    temporal.py             per-period mining and rule drift classification
     insights.py             the rulebook that turns rules into recommendations
+  recommend/
+    engine.py               rule-driven recommender + three baselines
+    evaluate.py             temporal split, leave-one-out, the metrics
   viz/
     theme.py                one validated palette, light and dark
     plots.py                the report figures
   pipeline.py               stage orchestration
   cli.py                    the `mba` command
 dashboard/app.py            Streamlit app
-tests/                      170 tests
+tests/                      269 tests
 scripts/download_data.py    dataset fetcher (UCI or Kaggle)
 ```
 
@@ -266,6 +381,13 @@ mba bench -g 0.05 0.03 0.02 0.01 --scaling
 mba ooc --synthetic 1000000 --chunk-size 100000 --memory-budget 800
 mba spark                    # distributed run, or the architecture notes
 mba regional --countries France Germany EIRE
+mba recommend                # held-out evaluation vs three baselines
+mba recommend --demo         # one explained recommendation
+mba segment --choose-k       # sweep k, report inertia and silhouette
+mba segment -k 4             # RFM segments + per-segment rules
+mba temporal -f M            # monthly rule drift
+mba stream --verify          # single-pass mining, guarantees checked
+mba compact --verify         # maximal/closed, support recovery proved
 mba dashboard
 mba sample -n 2500           # write a small committed sample
 ```
@@ -291,7 +413,7 @@ different retailer's export.
 ## Testing
 
 ```bash
-pytest                 # 170 tests, ~2 minutes
+pytest                 # 269 tests, ~6 minutes
 pytest -m "not slow"   # skip the real-dataset tests
 pytest -m slow         # only the real-dataset tests
 ```
@@ -315,6 +437,13 @@ evidence that it is right:
    is not tested.
 6. **Real data.** Seven `slow` tests run against the full UCI file, including a
    domain check that the known Regency teacup associations are recovered.
+7. **Guarantees, not claims.** Lossy Counting's three guarantees are each
+   asserted against an exact count; closure's losslessness is proved by
+   recovering every frequent itemset's support from the closed set alone;
+   Benjamini-Hochberg is checked against the 1995 paper's worked example.
+8. **Leakage.** The recommender tests assert that top-k is a prefix of top-K
+   (the property the one-pass evaluation relies on), that items unseen in
+   training are excluded, and that single-item test baskets are skipped.
 
 ---
 
@@ -365,6 +494,12 @@ as such everywhere it appears.
 
 ---
 
+## Further reading
+
+- [`docs/ALGORITHMS.md`](docs/ALGORITHMS.md) — how Apriori, FP-Growth, SON and PFP work, and why the crossover sits where it does
+- [`docs/METRICS.md`](docs/METRICS.md) — the six metrics and the seven-check quality triage
+- [`docs/PREDICTIVE.md`](docs/PREDICTIVE.md) — held-out evaluation, FDR correction, compact representations, streaming, segmentation and drift
+
 ## References
 
 - Agrawal & Srikant (1994), *Fast Algorithms for Mining Association Rules*, VLDB — Apriori
@@ -372,6 +507,10 @@ as such everywhere it appears.
 - Savasere, Omiecinski & Navathe (1995), *An Efficient Algorithm for Mining Association Rules in Large Databases*, VLDB — SON
 - Li et al. (2008), *PFP: Parallel FP-Growth for Query Recommendation*, RecSys — the Spark algorithm
 - Zhang (2000), *Association Rules* — Zhang's metric
+- Manku & Motwani (2002), *Approximate Frequency Counts over Data Streams*, VLDB — Lossy Counting
+- Benjamini & Hochberg (1995), *Controlling the False Discovery Rate*, JRSS-B — the FDR correction
+- Pasquier et al. (1999), *Discovering Frequent Closed Itemsets for Association Rules*, ICDT — closed itemsets
+- Arthur & Vassilvitskii (2007), *k-means++: The Advantages of Careful Seeding*, SODA — the clustering seeding
 - Chen, Sain & Hong (2012), *Data mining for the online retail industry*, Journal of Database Marketing — the dataset
 
 ## Licence

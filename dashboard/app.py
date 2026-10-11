@@ -137,6 +137,59 @@ def network_for(country: str, top_n: int, min_lift: float):
     return graph, graph_summary(graph)
 
 
+@st.cache_data(show_spinner="Scoring recommenders on a held-out future…")
+def recommender_evaluation(test_fraction: float, k_values: tuple[int, ...],
+                           min_support: float, max_cases: int | None):
+    from mba.recommend import compare_recommenders, temporal_split
+    from mba.recommend.engine import build_recommender
+    from mba.recommend.evaluate import lift_over_baseline
+
+    frame = load_clean()
+    schema = cfg["schema"]
+    train, test, meta = temporal_split(
+        frame, schema["invoice_col"], schema["item_col"], schema["date_col"],
+        test_fraction=test_fraction,
+    )
+    models = {
+        "association": build_recommender(
+            "association", mine_kwargs={"min_support": min_support, "max_len": 3}
+        ),
+        "cooccurrence": build_recommender("cooccurrence"),
+        "popularity": build_recommender("popularity"),
+        "random": build_recommender("random"),
+    }
+    scores = compare_recommenders(
+        train, test, models=models, k_values=k_values, max_cases=max_cases
+    )
+    return lift_over_baseline(scores), meta
+
+
+@st.cache_data(show_spinner="Clustering customers on RFM…")
+def segmentation(k: int, min_support: float):
+    from mba.analytics.segmentation import compare_segment_rules, segment_customers
+
+    result = segment_customers(load_clean(), cfg, k=k, min_support=min_support)
+    return result.profiles, result.customers, compare_segment_rules(result, top_n=5), result.silhouette
+
+
+@st.cache_data(show_spinner="Mining each period separately…")
+def temporal(freq: str, min_support: float):
+    from mba.analytics.temporal import rule_trajectory_matrix, temporal_analysis
+
+    result = temporal_analysis(load_clean(), cfg, freq=freq, min_support=min_support)
+    return result.period_stats, result.drift, rule_trajectory_matrix(result, 18), result.periods
+
+
+@st.cache_data(show_spinner="Streaming in one bounded-memory pass…")
+def streaming(min_support: float, epsilon: float):
+    from mba.scaling.streaming import compare_with_exact, stream_frequent_items
+
+    basket, _ = build_basket(ALL_COUNTRIES)
+    transactions = basket.as_item_lists()
+    frame, stats = stream_frequent_items(transactions, min_support, epsilon)
+    return frame, stats.to_dict(), compare_with_exact(transactions, min_support, epsilon)
+
+
 # -------------------------------------------------------------- components
 def metric_cards(cards: list[tuple[str, str, str]]) -> None:
     """Render a row of stat tiles. A number is a tile, not a chart."""
@@ -383,7 +436,8 @@ metric_cards([
 
 tabs = st.tabs([
     "📊 Overview", "🔗 Rules", "🕸️ Network", "🌍 Regions",
-    "⚡ Benchmark", "💡 Insights", "🧾 Data quality",
+    "🎯 Recommender", "👥 Segments", "📈 Drift",
+    "⚡ Benchmark", "🌊 Streaming", "💡 Insights", "🧾 Data quality",
 ])
 
 # -- Overview ------------------------------------------------------------
@@ -554,8 +608,234 @@ with tabs[3]:
             )
             st.dataframe(distinctive, use_container_width=True, hide_index=True)
 
-# -- Benchmark -----------------------------------------------------------
+# -- Recommender ---------------------------------------------------------
 with tabs[4]:
+    st.caption(
+        "Mining proves a pattern existed. This proves it **predicts**. Models "
+        "train on the earliest baskets and are scored on later ones they have "
+        "never seen — a temporal split, because in production you only ever "
+        "have the past."
+    )
+    left, right, far = st.columns(3)
+    with left:
+        test_fraction = st.slider("Test share (most recent baskets)", 0.1, 0.4, 0.25, 0.05)
+    with right:
+        rec_support = st.select_slider(
+            "Rule-mining support (training split only)",
+            options=[0.003, 0.005, 0.01, 0.02], value=0.005,
+        )
+    with far:
+        cap = st.select_slider(
+            "Cap test cases", options=[500, 1000, 2000, 0], value=1000,
+            format_func=lambda v: "no cap" if v == 0 else f"{v:,}",
+            help="A full run scores every test basket and takes a few minutes.",
+        )
+
+    if st.button("Run held-out evaluation", type="primary"):
+        st.session_state["rec"] = recommender_evaluation(
+            test_fraction, (1, 5, 10), rec_support, cap or None
+        )
+
+    if "rec" in st.session_state:
+        scores, meta = st.session_state["rec"]
+        st.info(
+            f"**Train** {meta['train_start']} → {meta['train_end']} "
+            f"({meta['n_train']:,} baskets)  ·  "
+            f"**Test** {meta['cut_date']} → {meta['test_end']} "
+            f"({meta['n_test']:,} baskets). Rules are mined on the training "
+            "split only, so no test-period co-occurrence reaches the model."
+        )
+
+        at_k = scores.loc[scores["k"] == 5].sort_values("hit_rate@k", ascending=False)
+        if not at_k.empty:
+            best = at_k.iloc[0]
+            metric_cards([
+                (f"{best['hit_rate@k']:.1%}", f"Hit rate @5 — {best['model']}",
+                 "held-out baskets recovered"),
+                (f"{best['vs_popularity']:.1f}×", "vs popularity", "the baseline to beat"),
+                (f"{best['MAP@k']:.3f}", "MAP @5", "rewards ranking it high"),
+                (f"{best['coverage']:.1%}", "Catalogue coverage", "breadth of what it suggests"),
+            ])
+
+        figure = go.Figure()
+        for index, model in enumerate(scores["model"].unique()):
+            subset = scores.loc[scores["model"] == model].sort_values("k")
+            figure.add_trace(
+                go.Scatter(
+                    x=subset["k"], y=subset["hit_rate@k"], name=model,
+                    mode="lines+markers",
+                    line=dict(color=CATEGORICAL_DARK[index % len(CATEGORICAL_DARK)], width=2),
+                    marker=dict(size=9, line=dict(color=DARK["surface"], width=2)),
+                    hovertemplate=f"{model}<br>k=%{{x}}<br>hit rate %{{y:.2%}}<extra></extra>",
+                )
+            )
+        figure.update_layout(**PLOTLY_LAYOUT, height=420,
+                             title_text="Hit rate against k — association vs the baselines")
+        figure.update_xaxes(title_text="k (recommendations shown)", dtick=1)
+        figure.update_yaxes(title_text="Hit rate", tickformat=".0%")
+        st.plotly_chart(figure, use_container_width=True)
+
+        st.dataframe(
+            scores[[c for c in [
+                "model", "k", "n_test_baskets", "hit_rate@k", "precision@k",
+                "MAP@k", "MRR", "coverage", "novelty", "vs_popularity",
+            ] if c in scores.columns]],
+            use_container_width=True, hide_index=True,
+        )
+        st.caption(
+            "Read coverage and novelty next to accuracy. A model can win on "
+            "hit rate while only ever recommending bestsellers — accurate, and "
+            "commercially worthless. The association model is the most "
+            "accurate here but recommends a narrower slice of the catalogue "
+            "than raw co-occurrence does."
+        )
+
+# -- Segments ------------------------------------------------------------
+with tabs[5]:
+    st.caption(
+        "A wholesale buyer and a one-time gift buyer are both 'customers'. "
+        "Pooled, their rules average into something describing neither. "
+        "Customers are clustered on recency, frequency and monetary value, "
+        "then each segment is mined separately."
+    )
+    left, right = st.columns(2)
+    with left:
+        seg_k = st.slider("Segments (k)", 2, 8, int(cfg.get("analytics.segmentation.k", 4)))
+    with right:
+        seg_support = st.select_slider(
+            "Per-segment support", options=[0.015, 0.02, 0.03, 0.04], value=0.02,
+            help="Lower than the global threshold: a segment holds a fraction "
+                 "of the baskets.",
+        )
+
+    if st.button("Run segmentation", type="primary"):
+        st.session_state["seg"] = segmentation(seg_k, seg_support)
+
+    if "seg" in st.session_state:
+        profiles, customers, segment_rules, silhouette = st.session_state["seg"]
+
+        metric_cards([
+            (f"{len(customers):,}", "Customers", "with an identifiable ID"),
+            (f"{len(profiles)}", "Segments", f"silhouette {silhouette:.2f}"),
+            (f"{profiles['revenue_share'].max():.0%}", "Top segment's revenue",
+             f"from {profiles.loc[profiles['revenue_share'].idxmax(), 'customer_share']:.0%} of customers"),
+        ])
+
+        chart = profiles.sort_values("revenue_share")
+        figure = go.Figure()
+        figure.add_trace(go.Bar(
+            x=chart["customer_share"], y=chart["segment"], orientation="h",
+            name="share of customers", marker_color=CATEGORICAL_DARK[0],
+            hovertemplate="%{y}<br>%{x:.1%} of customers<extra></extra>",
+        ))
+        figure.add_trace(go.Bar(
+            x=chart["revenue_share"], y=chart["segment"], orientation="h",
+            name="share of revenue", marker_color=CATEGORICAL_DARK[1],
+            hovertemplate="%{y}<br>%{x:.1%} of revenue<extra></extra>",
+        ))
+        figure.update_layout(**PLOTLY_LAYOUT, height=380, barmode="group",
+                             title_text="Where the customers are, and where the money is")
+        figure.update_xaxes(title_text="Share", tickformat=".0%")
+        st.plotly_chart(figure, use_container_width=True)
+        st.caption(
+            "The gap between the two bars is the finding: a small segment "
+            "usually carries a disproportionate share of revenue."
+        )
+
+        st.subheader("Segment profiles")
+        st.dataframe(
+            profiles[["segment", "n_customers", "customer_share", "recency",
+                      "frequency", "monetary", "avg_basket_value", "revenue_share"]],
+            use_container_width=True, hide_index=True,
+        )
+        if not segment_rules.empty:
+            st.subheader("Strongest rules per segment")
+            st.caption("Where these differ between segments, a single global rules table was hiding it.")
+            st.dataframe(segment_rules, use_container_width=True, hide_index=True)
+
+# -- Drift ---------------------------------------------------------------
+with tabs[6]:
+    st.caption(
+        "A rule mined over a whole year states that an association held *on "
+        "average*. That hides the difference between a stable product fact and "
+        "a seasonal one. Each period is mined independently."
+    )
+    left, right = st.columns(2)
+    with left:
+        freq = st.radio("Period", ["M", "Q"], horizontal=True,
+                        format_func=lambda v: {"M": "Monthly", "Q": "Quarterly"}[v])
+    with right:
+        drift_support = st.select_slider(
+            "Per-period support", options=[0.02, 0.03, 0.04, 0.05], value=0.03
+        )
+
+    if st.button("Run drift analysis", type="primary"):
+        st.session_state["drift"] = temporal(freq, drift_support)
+
+    if "drift" in st.session_state:
+        period_stats, drift, matrix, periods = st.session_state["drift"]
+
+        if not drift.empty:
+            counts = drift["rule_class"].value_counts()
+            metric_cards([
+                (f"{len(periods)}", "Periods mined", "each independently"),
+                (f"{len(drift):,}", "Distinct rules", "across all periods"),
+                (f"{int(counts.get('stable', 0))}", "Stable", "hold throughout"),
+                (f"{int(counts.get('emerging', 0))}", "Emerging", "trending up"),
+                (f"{int(counts.get('decaying', 0))}", "Decaying", "trending down"),
+                (f"{int(counts.get('seasonal', 0))}", "Seasonal", "high lift variance"),
+                (f"{int(counts.get('intermittent', 0))}", "Intermittent",
+                 "steady but near the threshold"),
+            ])
+            if int(counts.get("seasonal", 0)) == 0:
+                st.info(
+                    "**No rule is statistically seasonal.** No association's lift "
+                    "varies enough across periods to clear the threshold — basket "
+                    "*volume* here is strongly seasonal while product *affinities* "
+                    "are not. Rules present in only part of the year are classed "
+                    "`intermittent` instead: they sit near the support threshold "
+                    "rather than genuinely coming and going with the season."
+                )
+
+        figure = go.Figure()
+        figure.add_trace(go.Bar(
+            x=period_stats["period"], y=period_stats["baskets"],
+            marker_color=[
+                STATUS["warning"] if partial else CATEGORICAL_DARK[0]
+                for partial in period_stats.get("partial", [False] * len(period_stats))
+            ],
+            hovertemplate="%{x}<br>%{y:,} baskets<extra></extra>",
+        ))
+        figure.update_layout(**PLOTLY_LAYOUT, height=340, showlegend=False,
+                             title_text="Baskets per period (amber = partial period)")
+        st.plotly_chart(figure, use_container_width=True)
+
+        if not matrix.empty:
+            st.subheader("Lift trajectory of the strongest rules")
+            heat = go.Figure(go.Heatmap(
+                z=matrix.to_numpy(), x=list(matrix.columns), y=list(matrix.index),
+                colorscale=[[0, "#cde2fb"], [1, "#0d366b"]],
+                hovertemplate="%{y}<br>%{x}<br>lift %{z:.1f}<extra></extra>",
+                colorbar=dict(title="Lift", outlinewidth=0),
+            ))
+            heat.update_layout(**PLOTLY_LAYOUT, height=560,
+                               title_text="Blank = the rule did not clear the threshold that period")
+            st.plotly_chart(heat, use_container_width=True)
+            st.caption(
+                "A blank cell is not a lift of zero — it means the rule fell "
+                "below the support threshold that period, which is itself "
+                "information."
+            )
+
+        if not drift.empty:
+            st.subheader("Rule drift")
+            st.dataframe(
+                drift.drop(columns=["trajectory"], errors="ignore"),
+                use_container_width=True, height=400, hide_index=True,
+            )
+
+# -- Benchmark -----------------------------------------------------------
+with tabs[7]:
     st.caption(
         "Both algorithms return identical itemsets, so this is purely about "
         "cost. Apriori pays for candidate generation, which explodes as support "
@@ -621,8 +901,72 @@ with tabs[4]:
             + ("yes ✅" if result.verify_agreement() else "NO — investigate ⚠️")
         )
 
+# -- Streaming -----------------------------------------------------------
+with tabs[8]:
+    st.caption(
+        "Every other miner here assumes the data is finite and re-readable. "
+        "A live checkout feed is neither. Lossy Counting trades a *bounded, "
+        "known* amount of accuracy for bounded memory in a single pass."
+    )
+    left, right = st.columns(2)
+    with left:
+        stream_support = st.select_slider(
+            "Minimum support", options=[0.01, 0.02, 0.03, 0.05], value=0.02
+        )
+    with right:
+        epsilon = st.select_slider(
+            "Error tolerance ε", options=[0.0005, 0.001, 0.002, 0.005], value=0.002,
+            help="Must sit well below the support threshold. Smaller ε means "
+                 "tighter counts and a bigger table.",
+        )
+
+    if st.button("Run single pass", type="primary"):
+        st.session_state["stream"] = streaming(stream_support, epsilon)
+
+    if "stream" in st.session_state:
+        frame, stats, comparison = st.session_state["stream"]
+        reported = comparison.loc[comparison["reported"]]
+
+        metric_cards([
+            (f"{stats['n_observations']:,}", "Observations", "single pass"),
+            (f"{stats['distinct_seen']:,}", "Distinct items", "seen in the stream"),
+            (f"{stats['peak_entries']:,}", "Entries held", f"{stats['memory_saving']:.1f}× fewer"),
+            (f"±{stats['max_count_error']:,.0f}", "Guaranteed error", "worst-case undercount"),
+        ])
+
+        st.subheader("The guarantees, checked against an exact count")
+        false_negatives = int(comparison["false_negative"].sum())
+        overestimates = bool((reported["error"] < 0).any())
+        worst = int(reported["error"].max()) if not reported.empty else 0
+        checks = pd.DataFrame([
+            {"guarantee": "No false negatives",
+             "expected": "0", "observed": f"{false_negatives}",
+             "holds": "✅" if false_negatives == 0 else "❌"},
+            {"guarantee": "Counts never overestimate",
+             "expected": "False", "observed": str(overestimates),
+             "holds": "✅" if not overestimates else "❌"},
+            {"guarantee": f"Undercount ≤ ε·N ({stats['max_count_error']:,.0f})",
+             "expected": f"≤ {stats['max_count_error']:,.0f}", "observed": f"{worst}",
+             "holds": "✅" if worst <= stats["max_count_error"] else "❌"},
+            {"guarantee": "Table within the space bound",
+             "expected": f"≤ {stats['space_bound']:,.0f}",
+             "observed": f"{stats['peak_entries']:,}",
+             "holds": "✅" if stats["within_space_bound"] else "❌"},
+        ])
+        st.dataframe(checks, use_container_width=True, hide_index=True)
+        st.caption(
+            "The classical (1/ε)·log(εN) bound assumes one item per "
+            "observation. A basket inserts ~24 at once, so the applicable "
+            "bound is scaled — reporting the unscaled one here would claim a "
+            "guarantee the algorithm does not give in this setting."
+        )
+
+        if not frame.empty:
+            st.subheader(f"Frequent items ({len(frame):,} above threshold)")
+            st.dataframe(frame.head(30), use_container_width=True, hide_index=True)
+
 # -- Insights ------------------------------------------------------------
-with tabs[5]:
+with tabs[9]:
     insights = generate_insights(
         rules, cfg, frame=frame, n_transactions=basket.n_transactions,
         graph_summary=graph_summary(network_for(country, 34, 1.5)[0]),
@@ -642,7 +986,7 @@ with tabs[5]:
                 )
 
 # -- Data quality --------------------------------------------------------
-with tabs[6]:
+with tabs[10]:
     st.subheader("Rule quality triage")
     if flags is not None:
         st.write(flags.summary())

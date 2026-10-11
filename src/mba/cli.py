@@ -7,6 +7,11 @@
     mba ooc          out-of-core (SON) mining, with a synthetic load-test mode
     mba spark        distributed FP-Growth (or the architecture notes)
     mba regional     per-country analysis
+    mba recommend    rule-based recommender, scored on a held-out future
+    mba segment      RFM customer segments and per-segment rules
+    mba temporal     how each rule drifts month by month
+    mba stream       single-pass bounded-memory mining (Lossy Counting)
+    mba compact      maximal and closed itemsets
     mba dashboard    launch the Streamlit app
     mba sample       write a small committed sample dataset
 
@@ -282,6 +287,278 @@ def cmd_regional(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def cmd_recommend(args: argparse.Namespace, cfg: Config) -> int:
+    from mba.data import clean_transactions, load_raw
+    from mba.recommend import compare_recommenders, temporal_split
+    from mba.recommend.engine import build_recommender
+    from mba.recommend.evaluate import lift_over_baseline
+
+    raw = load_raw(cfg, path=args.input, nrows=args.nrows)
+    clean, _ = clean_transactions(raw, cfg)
+    schema = cfg["schema"]
+
+    train, test, meta = temporal_split(
+        clean, schema["invoice_col"], schema["item_col"], schema["date_col"],
+        test_fraction=args.test_fraction,
+    )
+    _banner("TEMPORAL SPLIT")
+    print(
+        f"train: {meta['train_start']} -> {meta['train_end']}   "
+        f"{meta['n_train']:,} baskets\n"
+        f"test:  {meta['cut_date']} -> {meta['test_end']}   {meta['n_test']:,} baskets\n"
+        "Rules are mined on the training split only, so no test-period\n"
+        "co-occurrence can reach the model."
+    )
+
+    if args.demo:
+        model = build_recommender(
+            "association",
+            strategy=args.strategy,
+            mine_kwargs={"min_support": args.min_support, "max_len": args.max_len},
+        )
+        model.fit(train)
+        example = sorted(set(test[0])) if test else []
+        _banner("EXAMPLE RECOMMENDATION")
+        print("basket:", ", ".join(example[:6]) + (" ..." if len(example) > 6 else ""))
+        print()
+        print(model.explain(example, k=args.k).to_string(index=False))
+        return 0
+
+    models = {
+        "association": build_recommender(
+            "association",
+            strategy=args.strategy,
+            mine_kwargs={"min_support": args.min_support, "max_len": args.max_len},
+        ),
+        "cooccurrence": build_recommender("cooccurrence"),
+        "popularity": build_recommender("popularity"),
+        "random": build_recommender("random"),
+    }
+    frame = compare_recommenders(
+        train, test, models=models, k_values=tuple(args.k_values),
+        max_cases=args.max_cases,
+    )
+    frame = lift_over_baseline(frame)
+
+    _banner("HELD-OUT EVALUATION (leave-one-out over test baskets)")
+    columns = [
+        "model", "k", "n_test_baskets", "hit_rate@k", "precision@k",
+        "MAP@k", "MRR", "coverage", "novelty", "vs_popularity",
+    ]
+    print(frame[[c for c in columns if c in frame.columns]].to_string(index=False))
+
+    reports = cfg.path("paths.reports_dir")
+    reports.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(reports / "recommender_evaluation.csv", index=False)
+    print(f"\nWritten to {reports / 'recommender_evaluation.csv'}")
+    print(
+        "\nRead coverage and novelty alongside accuracy: a model can win on\n"
+        "hit-rate while only ever recommending bestsellers."
+    )
+    return 0
+
+
+def cmd_segment(args: argparse.Namespace, cfg: Config) -> int:
+    from mba.analytics.segmentation import (
+        choose_k, compare_segment_rules, segment_customers,
+    )
+    from mba.data import clean_transactions, load_raw
+
+    raw = load_raw(cfg, path=args.input, nrows=args.nrows)
+    clean, _ = clean_transactions(raw, cfg)
+
+    if args.choose_k:
+        grid = args.k_grid or cfg.get("analytics.segmentation.k_grid", [2, 3, 4, 5, 6])
+        _banner("CHOOSING k")
+        table = choose_k(clean, cfg, k_values=grid)
+        print(table.to_string(index=False))
+        print(
+            "\nInertia always falls as k rises, so read the silhouette column.\n"
+            "RFM is continuous rather than naturally clustered, so expect a\n"
+            "modest silhouette and pick k for business readability."
+        )
+        return 0
+
+    result = segment_customers(
+        clean, cfg, k=args.k, min_support=args.min_support, mine_rules=not args.no_rules
+    )
+    _banner("RFM SEGMENTS")
+    print(result.summary())
+    print()
+    print(
+        result.profiles[
+            ["segment", "n_customers", "customer_share", "recency", "frequency",
+             "monetary", "avg_basket_value", "revenue_share"]
+        ].to_string(index=False)
+    )
+
+    if result.rules:
+        _banner("STRONGEST RULES PER SEGMENT")
+        comparison = compare_segment_rules(result, top_n=args.top)
+        print(comparison.to_string(index=False) if not comparison.empty
+              else "no segment cleared the thresholds")
+
+    reports = cfg.path("paths.reports_dir")
+    reports.mkdir(parents=True, exist_ok=True)
+    result.customers.to_csv(reports / "customer_segments.csv", index=False)
+    result.profiles.to_csv(reports / "segment_profiles.csv", index=False)
+    if result.rules:
+        compare_segment_rules(result, top_n=50).to_csv(
+            reports / "segment_rules.csv", index=False
+        )
+    print(f"\nWritten to {reports}")
+    return 0
+
+
+def cmd_temporal(args: argparse.Namespace, cfg: Config) -> int:
+    from mba.analytics.temporal import (
+        rule_trajectory_matrix, seasonal_rules, temporal_analysis, trending_rules,
+    )
+    from mba.data import clean_transactions, load_raw
+
+    raw = load_raw(cfg, path=args.input, nrows=args.nrows)
+    clean, _ = clean_transactions(raw, cfg)
+    result = temporal_analysis(
+        clean, cfg, freq=args.freq, min_support=args.min_support
+    )
+
+    _banner(f"RULE DRIFT ACROSS {result.n_periods} PERIODS")
+    print(result.summary())
+    print()
+    print(result.period_stats.to_string(index=False))
+
+    trending = trending_rules(result, top_n=args.top)
+    if not trending.empty:
+        _banner("EMERGING AND DECAYING RULES")
+        print(
+            trending[
+                ["antecedents", "consequents", "rule_class", "periods_present",
+                 "mean_lift", "trend", "peak_period"]
+            ].to_string(index=False)
+        )
+
+    seasonal = seasonal_rules(result, top_n=args.top)
+    _banner("SEASONAL RULES")
+    if seasonal.empty:
+        print(
+            "None. No rule's lift varies enough across periods to clear the\n"
+            "seasonal threshold — on this dataset basket *volume* is strongly\n"
+            "seasonal while product *affinities* are not."
+        )
+    else:
+        print(
+            seasonal[
+                ["antecedents", "consequents", "mean_lift", "max_lift",
+                 "lift_cv", "peak_period"]
+            ].to_string(index=False)
+        )
+
+    reports = cfg.path("paths.reports_dir")
+    reports.mkdir(parents=True, exist_ok=True)
+    if not result.drift.empty:
+        result.drift.drop(columns=["trajectory"]).to_csv(
+            reports / "temporal_rule_drift.csv", index=False
+        )
+    result.period_stats.to_csv(reports / "temporal_periods.csv", index=False)
+    matrix = rule_trajectory_matrix(result, top_n=25)
+    if not matrix.empty:
+        matrix.to_csv(reports / "temporal_lift_matrix.csv")
+    print(f"\nWritten to {reports}")
+    return 0
+
+
+def cmd_stream(args: argparse.Namespace, cfg: Config) -> int:
+    from mba.scaling.streaming import compare_with_exact, stream_frequent_items
+
+    if args.synthetic:
+        from mba.scaling.outofcore import SyntheticTransactions
+
+        print(f"Streaming {args.synthetic:,} synthetic transactions...")
+        transactions = SyntheticTransactions(
+            n_transactions=args.synthetic, n_items=args.synthetic_items
+        )
+        frame, stats = stream_frequent_items(
+            transactions, min_support=args.min_support, epsilon=args.epsilon,
+            progress_every=max(args.synthetic // 10, 1),
+        )
+    else:
+        from mba.data import clean_transactions, load_raw
+        from mba.data.basket import transactions_from_frame
+
+        raw = load_raw(cfg, path=args.input, nrows=args.nrows)
+        clean, _ = clean_transactions(raw, cfg)
+        transactions = transactions_from_frame(
+            clean, cfg["schema"]["invoice_col"], cfg["schema"]["item_col"]
+        )
+        frame, stats = stream_frequent_items(
+            transactions, min_support=args.min_support, epsilon=args.epsilon
+        )
+
+    _banner("LOSSY COUNTING (single pass, bounded memory)")
+    print(stats.summary())
+    print()
+    for key, value in stats.to_dict().items():
+        print(f"  {key:<30s} {value}")
+
+    if not frame.empty:
+        _banner(f"TOP FREQUENT ITEMS ({len(frame):,} above threshold)")
+        print(frame.head(args.top).to_string(index=False))
+
+    if args.verify and not args.synthetic:
+        _banner("GUARANTEES, CHECKED AGAINST AN EXACT COUNT")
+        comparison = compare_with_exact(
+            transactions, min_support=args.min_support, epsilon=args.epsilon
+        )
+        reported = comparison.loc[comparison["reported"]]
+        print(f"  truly frequent items     {int(comparison['truly_frequent'].sum()):,}")
+        print(f"  reported by the stream   {int(comparison['reported'].sum()):,}")
+        print(f"  false negatives          {int(comparison['false_negative'].sum()):,}  (guarantee: 0)")
+        print(f"  any overestimate         {bool((reported['error'] < 0).any())}  (guarantee: False)")
+        print(f"  largest undercount       {int(reported['error'].max())}  "
+              f"(bound: {stats.max_count_error:,.0f})")
+        print(f"  all within the bound     {bool(reported['within_error_bound'].all())}")
+    return 0
+
+
+def cmd_compact(args: argparse.Namespace, cfg: Config) -> int:
+    from mba.data import clean_transactions, encode_baskets, load_raw
+    from mba.mining.base import mine
+    from mba.mining.compact import compact_representations, recover_support
+
+    raw = load_raw(cfg, path=args.input, nrows=args.nrows)
+    clean, _ = clean_transactions(raw, cfg)
+    basket = encode_baskets(clean, cfg)
+    result = mine(
+        basket, algorithm=cfg.get("mining.algorithm", "fpgrowth"),
+        min_support=args.min_support, max_len=args.max_len,
+    )
+    compact = compact_representations(result)
+
+    _banner("COMPACT REPRESENTATIONS")
+    print(compact.summary())
+    print()
+    for key, value in compact.to_dict().items():
+        print(f"  {key:<24s} {value}")
+
+    if args.verify:
+        mismatches = sum(
+            1
+            for itemset, count in zip(result.itemsets["itemsets"], result.itemsets["count"])
+            if recover_support(itemset, compact.closed) != int(count)
+        )
+        print(
+            f"\n  support recovered from the closed set alone: "
+            f"{'exact for all ' + format(len(result.itemsets), ',') + ' itemsets' if not mismatches else str(mismatches) + ' MISMATCHES'}"
+        )
+    if compact.closed_compression < 1.05:
+        print(
+            "\nClosure gives no compression here. That is expected on sparse\n"
+            "retail baskets: an itemset and a superset almost never share a\n"
+            "support count. Closure pays off on dense data."
+        )
+    return 0
+
+
 def cmd_dashboard(args: argparse.Namespace, cfg: Config) -> int:
     import subprocess
 
@@ -393,6 +670,59 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--countries", nargs="+")
     p.add_argument("--reference", default="United Kingdom")
     p.set_defaults(func=cmd_regional)
+
+    p = sub.add_parser("recommend", parents=[common],
+                       help="recommender scored on a held-out future")
+    p.add_argument("--test-fraction", type=float, default=0.25)
+    p.add_argument("--k-values", type=int, nargs="+", default=[1, 5, 10])
+    p.add_argument("-k", type=int, default=5, help="k for --demo")
+    p.add_argument("-s", "--min-support", type=float, default=0.005,
+                   help="support for mining rules on the training split")
+    p.add_argument("-l", "--max-len", type=int, default=3)
+    p.add_argument("--strategy", default="weighted",
+                   choices=["weighted", "confidence", "max_confidence"])
+    p.add_argument("--max-cases", type=int, help="cap test cases (for a quick run)")
+    p.add_argument("--demo", action="store_true",
+                   help="show one explained recommendation instead of evaluating")
+    p.set_defaults(func=cmd_recommend)
+
+    p = sub.add_parser("segment", parents=[common],
+                       help="RFM segments and per-segment rules")
+    p.add_argument("-k", type=int, help="number of segments (default from config)")
+    p.add_argument("-s", "--min-support", type=float,
+                   help="per-segment support (default from config)")
+    p.add_argument("--choose-k", action="store_true",
+                   help="sweep k and report inertia and silhouette")
+    p.add_argument("--k-grid", type=int, nargs="+")
+    p.add_argument("--no-rules", action="store_true", help="segment only, skip mining")
+    p.add_argument("--top", type=int, default=5)
+    p.set_defaults(func=cmd_segment)
+
+    p = sub.add_parser("temporal", parents=[common], help="rule drift over time")
+    p.add_argument("-f", "--freq", default=None, help="M, W or Q (default from config)")
+    p.add_argument("-s", "--min-support", type=float)
+    p.add_argument("--top", type=int, default=10)
+    p.set_defaults(func=cmd_temporal)
+
+    p = sub.add_parser("stream", parents=[common],
+                       help="single-pass bounded-memory mining (Lossy Counting)")
+    p.add_argument("-s", "--min-support", type=float, default=0.02)
+    p.add_argument("-e", "--epsilon", type=float, default=0.002,
+                   help="error tolerance; must be well below --min-support")
+    p.add_argument("--synthetic", type=int, metavar="N")
+    p.add_argument("--synthetic-items", type=int, default=5000)
+    p.add_argument("--top", type=int, default=20)
+    p.add_argument("--verify", action="store_true",
+                   help="check the guarantees against an exact count")
+    p.set_defaults(func=cmd_stream)
+
+    p = sub.add_parser("compact", parents=[common],
+                       help="maximal and closed itemsets")
+    p.add_argument("-s", "--min-support", type=float, default=0.015)
+    p.add_argument("-l", "--max-len", type=int, default=3)
+    p.add_argument("--verify", action="store_true",
+                   help="prove support is recoverable from the closed set alone")
+    p.set_defaults(func=cmd_compact)
 
     p = sub.add_parser("dashboard", parents=[common], help="launch the Streamlit app")
     p.add_argument("--port", type=int, default=8501)
