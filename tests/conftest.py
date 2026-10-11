@@ -114,13 +114,29 @@ def toy_basket(toy_transactions):
 
 @pytest.fixture(scope="session")
 def real_data_path(cfg) -> Path | None:
-    """Path to the real dataset, or ``None`` when it has not been downloaded."""
+    """Path to the *full* dataset, or ``None`` when it has not been downloaded.
+
+    ``resolve_source`` deliberately falls back to the committed 2,500-invoice
+    sample so the pipeline runs on a fresh clone. The tests in
+    ``test_real_dataset.py`` assert properties of the full 541,909-row file,
+    so the sample satisfying the lookup is exactly wrong: those tests would
+    run against it and *fail* the shape assertions rather than skip.
+
+    Anything resolving inside the sample directory is therefore reported as
+    "not downloaded", which is what the skip in those tests keys on.
+    """
     try:
         from mba.data.loader import resolve_source
 
-        return resolve_source(cfg)
+        source = resolve_source(cfg)
     except FileNotFoundError:
         return None
+
+    sample_dir = cfg.path("paths.sample_dir").resolve()
+    resolved = source.resolve()
+    if resolved == sample_dir or sample_dir in resolved.parents:
+        return None
+    return source
 
 
 def brute_force_itemsets(
