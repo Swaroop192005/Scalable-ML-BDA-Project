@@ -413,7 +413,7 @@ different retailer's export.
 ## Testing
 
 ```bash
-pytest                 # 269 tests, ~6 minutes
+pytest                 # 269 tests, ~30 seconds
 pytest -m "not slow"   # skip the real-dataset tests
 pytest -m slow         # only the real-dataset tests
 ```
