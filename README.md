@@ -48,6 +48,19 @@ No download needed to try it — a 2,500-invoice sample is committed:
 mba run -i data/sample/sample_retail.csv
 ```
 
+If the download fails, run the diagnostic:
+
+```bash
+bash scripts/check_download.sh
+```
+
+It tests DNS, curl, Python's own HTTPS stack, the downloader and the
+resulting file in that order, so the first failure names the layer that
+actually broke rather than leaving you with a traceback. Python is checked
+separately from curl because on macOS the python.org installer ships its own
+certificate store — curl can succeed while Python fails, and testing with
+curl alone would miss the most common macOS failure.
+
 ---
 
 ## The dataset
@@ -366,6 +379,7 @@ src/mba/
 dashboard/app.py            Streamlit app
 tests/                      269 tests
 scripts/download_data.py    dataset fetcher (UCI or Kaggle)
+scripts/check_download.sh   layered diagnostic when the fetch fails
 ```
 
 ---
