@@ -72,6 +72,29 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+def _streamlit_version() -> tuple[int, ...]:
+    """(major, minor, patch) of the installed Streamlit, missing parts as 0."""
+    parts: list[int] = []
+    for chunk in st.__version__.split(".")[:3]:
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
+
+
+# Streamlit 1.49 replaced `use_container_width=True` with `width="stretch"`
+# and warns loudly on every element until you switch — which, on a dashboard
+# with 25 of them, floods the console on every rerun.
+#
+# requirements.txt allows streamlit>=1.28, so hard-coding either spelling
+# breaks half the supported range: the new one raises TypeError on old
+# versions, the old one warns on new ones. Pick at import time instead and
+# splat it at each call site.
+FULL_WIDTH = (
+    {"width": "stretch"} if _streamlit_version() >= (1, 49) else {"use_container_width": True}
+)
+
 PLOTLY_LAYOUT = dict(
     paper_bgcolor=DARK["surface"],
     plot_bgcolor=DARK["surface"],
@@ -448,16 +471,14 @@ with tabs[0]:
             ranked_bar(
                 eda["top_products_volume"], eda["top_products_volume"].columns[0],
                 "transactions", "Top products by number of baskets",
-            ),
-            use_container_width=True,
+            ), **FULL_WIDTH,
         )
     with right:
         st.plotly_chart(
             ranked_bar(
                 eda["top_products_revenue"], eda["top_products_revenue"].columns[0],
                 "revenue", "Top products by revenue", prefix="£",
-            ),
-            use_container_width=True,
+            ), **FULL_WIDTH,
         )
 
     left, right = st.columns(2)
@@ -474,7 +495,7 @@ with tabs[0]:
                              title_text="Basket size distribution")
         figure.update_xaxes(title_text="Distinct items per basket", range=[0, 60])
         figure.update_yaxes(title_text="Invoices")
-        st.plotly_chart(figure, use_container_width=True)
+        st.plotly_chart(figure, **FULL_WIDTH)
         st.caption(
             f"Median {eda.scalars['median_basket_size']:.0f} items, "
             f"mean {eda.scalars['mean_basket_size']:.1f}, "
@@ -495,7 +516,7 @@ with tabs[0]:
             figure.update_layout(**PLOTLY_LAYOUT, height=400,
                                  title_text="Baskets per month")
             figure.update_yaxes(title_text="Baskets")
-            st.plotly_chart(figure, use_container_width=True)
+            st.plotly_chart(figure, **FULL_WIDTH)
             st.caption(
                 "Revenue is plotted separately in the report bundle rather than "
                 "on a second y-axis here — two scales on one chart can invent a "
@@ -519,11 +540,10 @@ with tabs[1]:
             "confidence in the sidebar."
         )
     else:
-        st.plotly_chart(rule_scatter(visible), use_container_width=True)
+        st.plotly_chart(rule_scatter(visible), **FULL_WIDTH)
         st.subheader(f"{len(visible):,} rules")
         st.dataframe(
-            rules_table(visible, int(cfg.get("dashboard.max_rules_displayed", 500))),
-            use_container_width=True, height=440, hide_index=True,
+            rules_table(visible, int(cfg.get("dashboard.max_rules_displayed", 500))), **FULL_WIDTH, height=440, hide_index=True,
         )
         st.download_button(
             "Download rules as CSV",
@@ -559,7 +579,7 @@ with tabs[2]:
     if graph.number_of_nodes() == 0:
         st.warning("No co-occurrence links above this lift threshold.")
     else:
-        st.plotly_chart(network_figure(graph, summary), use_container_width=True)
+        st.plotly_chart(network_figure(graph, summary), **FULL_WIDTH)
         left, right = st.columns([2, 1])
         with left:
             st.subheader("Centrality")
@@ -569,7 +589,7 @@ with tabs[2]:
                 "the cheapest route into a second category."
             )
             st.dataframe(
-                summary["centrality_table"].head(20), use_container_width=True,
+                summary["centrality_table"].head(20), **FULL_WIDTH,
                 hide_index=True,
             )
         with right:
@@ -598,7 +618,7 @@ with tabs[3]:
     if "regions" in st.session_state:
         comparison, distinctive = st.session_state["regions"]
         st.subheader("Markets compared")
-        st.dataframe(comparison, use_container_width=True, hide_index=True)
+        st.dataframe(comparison, **FULL_WIDTH, hide_index=True)
         if not distinctive.empty:
             st.subheader("Associations much stronger than in the UK")
             st.caption(
@@ -606,7 +626,7 @@ with tabs[3]:
                 "several times the lift in one market is a local fact — and the "
                 "only kind worth a localised campaign."
             )
-            st.dataframe(distinctive, use_container_width=True, hide_index=True)
+            st.dataframe(distinctive, **FULL_WIDTH, hide_index=True)
 
 # -- Recommender ---------------------------------------------------------
 with tabs[4]:
@@ -673,14 +693,13 @@ with tabs[4]:
                              title_text="Hit rate against k — association vs the baselines")
         figure.update_xaxes(title_text="k (recommendations shown)", dtick=1)
         figure.update_yaxes(title_text="Hit rate", tickformat=".0%")
-        st.plotly_chart(figure, use_container_width=True)
+        st.plotly_chart(figure, **FULL_WIDTH)
 
         st.dataframe(
             scores[[c for c in [
                 "model", "k", "n_test_baskets", "hit_rate@k", "precision@k",
                 "MAP@k", "MRR", "coverage", "novelty", "vs_popularity",
-            ] if c in scores.columns]],
-            use_container_width=True, hide_index=True,
+            ] if c in scores.columns]], **FULL_WIDTH, hide_index=True,
         )
         st.caption(
             "Read coverage and novelty next to accuracy. A model can win on "
@@ -736,7 +755,7 @@ with tabs[5]:
         figure.update_layout(**PLOTLY_LAYOUT, height=380, barmode="group",
                              title_text="Where the customers are, and where the money is")
         figure.update_xaxes(title_text="Share", tickformat=".0%")
-        st.plotly_chart(figure, use_container_width=True)
+        st.plotly_chart(figure, **FULL_WIDTH)
         st.caption(
             "The gap between the two bars is the finding: a small segment "
             "usually carries a disproportionate share of revenue."
@@ -745,13 +764,12 @@ with tabs[5]:
         st.subheader("Segment profiles")
         st.dataframe(
             profiles[["segment", "n_customers", "customer_share", "recency",
-                      "frequency", "monetary", "avg_basket_value", "revenue_share"]],
-            use_container_width=True, hide_index=True,
+                      "frequency", "monetary", "avg_basket_value", "revenue_share"]], **FULL_WIDTH, hide_index=True,
         )
         if not segment_rules.empty:
             st.subheader("Strongest rules per segment")
             st.caption("Where these differ between segments, a single global rules table was hiding it.")
-            st.dataframe(segment_rules, use_container_width=True, hide_index=True)
+            st.dataframe(segment_rules, **FULL_WIDTH, hide_index=True)
 
 # -- Drift ---------------------------------------------------------------
 with tabs[6]:
@@ -808,7 +826,7 @@ with tabs[6]:
         ))
         figure.update_layout(**PLOTLY_LAYOUT, height=340, showlegend=False,
                              title_text="Baskets per period (amber = partial period)")
-        st.plotly_chart(figure, use_container_width=True)
+        st.plotly_chart(figure, **FULL_WIDTH)
 
         if not matrix.empty:
             st.subheader("Lift trajectory of the strongest rules")
@@ -820,7 +838,7 @@ with tabs[6]:
             ))
             heat.update_layout(**PLOTLY_LAYOUT, height=560,
                                title_text="Blank = the rule did not clear the threshold that period")
-            st.plotly_chart(heat, use_container_width=True)
+            st.plotly_chart(heat, **FULL_WIDTH)
             st.caption(
                 "A blank cell is not a lift of zero — it means the rule fell "
                 "below the support threshold that period, which is itself "
@@ -830,8 +848,7 @@ with tabs[6]:
         if not drift.empty:
             st.subheader("Rule drift")
             st.dataframe(
-                drift.drop(columns=["trajectory"], errors="ignore"),
-                use_container_width=True, height=400, hide_index=True,
+                drift.drop(columns=["trajectory"], errors="ignore"), **FULL_WIDTH, height=400, hide_index=True,
             )
 
 # -- Benchmark -----------------------------------------------------------
@@ -873,7 +890,7 @@ with tabs[7]:
                              title_text="Runtime against support threshold")
         figure.update_xaxes(title_text="Minimum support (harder →)", autorange="reversed")
         figure.update_yaxes(title_text="Runtime, seconds (log)", type="log")
-        st.plotly_chart(figure, use_container_width=True)
+        st.plotly_chart(figure, **FULL_WIDTH)
 
         crossover = result.crossover()
         if crossover is not None:
@@ -893,8 +910,7 @@ with tabs[7]:
             result.frame[[
                 "algorithm", "min_support", "runtime_sec", "n_itemsets",
                 "peak_memory_mb", "total_candidates",
-            ]],
-            use_container_width=True, hide_index=True,
+            ]], **FULL_WIDTH, hide_index=True,
         )
         st.caption(
             "Itemsets identical across algorithms: "
@@ -953,7 +969,7 @@ with tabs[8]:
              "observed": f"{stats['peak_entries']:,}",
              "holds": "✅" if stats["within_space_bound"] else "❌"},
         ])
-        st.dataframe(checks, use_container_width=True, hide_index=True)
+        st.dataframe(checks, **FULL_WIDTH, hide_index=True)
         st.caption(
             "The classical (1/ε)·log(εN) bound assumes one item per "
             "observation. A basket inserts ~24 at once, so the applicable "
@@ -963,7 +979,7 @@ with tabs[8]:
 
         if not frame.empty:
             st.subheader(f"Frequent items ({len(frame):,} above threshold)")
-            st.dataframe(frame.head(30), use_container_width=True, hide_index=True)
+            st.dataframe(frame.head(30), **FULL_WIDTH, hide_index=True)
 
 # -- Insights ------------------------------------------------------------
 with tabs[9]:
@@ -1003,7 +1019,7 @@ with tabs[10]:
         )
         figure.update_layout(**PLOTLY_LAYOUT, height=340,
                              title_text="Why rules were flagged")
-        st.plotly_chart(figure, use_container_width=True)
+        st.plotly_chart(figure, **FULL_WIDTH)
 
         st.markdown(
             """
@@ -1024,8 +1040,7 @@ A rule can clear every threshold and still be worthless:
             st.dataframe(
                 format_rules(flagged.nlargest(50, "lift"))[
                     ["rule", "support", "confidence", "lift", "count", "flag_reasons"]
-                ],
-                use_container_width=True, hide_index=True,
+                ], **FULL_WIDTH, hide_index=True,
             )
 
     st.divider()
@@ -1033,5 +1048,5 @@ A rule can clear every threshold and still be worthless:
     st.caption("Every row dropped between the raw file and the mined matrix.")
     raw_rows = load_raw(cfg)
     _, report = clean_transactions(raw_rows, cfg)
-    st.dataframe(report.to_frame(), use_container_width=True, hide_index=True)
+    st.dataframe(report.to_frame(), **FULL_WIDTH, hide_index=True)
     st.write(report.summary())
