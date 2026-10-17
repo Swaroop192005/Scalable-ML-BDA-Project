@@ -513,6 +513,7 @@ as such everywhere it appears.
 - [`docs/ALGORITHMS.md`](docs/ALGORITHMS.md) — how Apriori, FP-Growth, SON and PFP work, and why the crossover sits where it does
 - [`docs/METRICS.md`](docs/METRICS.md) — the six metrics and the seven-check quality triage
 - [`docs/PREDICTIVE.md`](docs/PREDICTIVE.md) — held-out evaluation, FDR correction, compact representations, streaming, segmentation and drift
+- [`docs/DEMO.md`](docs/DEMO.md) — a timed 12-minute live demo runbook, with what to say at each step and the likely questions
 
 ## References
 
