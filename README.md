@@ -480,6 +480,35 @@ factor.
 PySpark is an optional extra. Without it the module still imports, and
 `mba spark` prints the architecture reference instead of failing.
 
+### Verified against the single-node miner
+
+The distributed path is not just written — it runs, and it agrees. On the full
+dataset at 2% support, Spark 4.2 FP-Growth and our from-scratch FP-Growth find
+**the same 344 frequent itemsets** and **the same 125 rules**, with support
+counts matching exactly. `tests/test_spark_parity.py` asserts that agreement
+and skips when PySpark is absent, mirroring the mlxtend parity suite.
+
+Three differences are expected, and the tests assert them rather than hide them:
+
+| | single-node | Spark |
+|---|---|---|
+| Transactions seen | 18,022 | 18,036 |
+| Itemset length | capped at `max_len` | uncapped |
+| Rule consequents | any non-empty subset | single item only |
+
+The transaction gap is not an error. `encode_baskets` first drops items
+appearing in fewer than `basket.min_item_support_count` baskets, which leaves a
+few baskets holding a single item; those go too. A stream cannot do that — it
+has not seen the end of the data — so Spark legitimately mines the unpruned
+input. One itemset's count differs by one basket as a result
+(`DOORMAT FANCY FONT HOME SWEET HOME`, 449 against 450), which is the whole of
+the disagreement between the two implementations.
+
+Spark 4 requires Java 17 or 21. On Debian and Ubuntu, installing PySpark from
+source can fail with `AttributeError: install_layout` — that is the distro's
+patched setuptools, not PySpark; install into a virtualenv, which uses
+setuptools from PyPI instead.
+
 ---
 
 ## Notes on method

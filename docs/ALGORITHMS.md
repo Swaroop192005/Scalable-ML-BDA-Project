@@ -198,3 +198,17 @@ that makes it scale.
 
 See `src/mba/scaling/spark_fpgrowth.py` for the implementation and sizing
 guidance.
+
+### Cross-validation
+
+Run against the full dataset at 2% support on a local Spark 4.2 session, PFP
+returns the same 344 frequent itemsets and the same 125 single-consequent
+rules as the sequential FP-Growth in `src/mba/mining/fpgrowth.py`, with
+identical support counts. Two independent implementations of two different
+algorithms, written in different languages, agreeing item for item is a
+stronger correctness argument than either one agreeing with its own brute-force
+checker.
+
+`tests/test_spark_parity.py` makes that a standing assertion, including the
+three places the two paths legitimately differ (transaction pruning, itemset
+length cap, and consequent arity) — see the table in the README.

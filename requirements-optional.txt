@@ -4,6 +4,9 @@
 # implementation (used by tests/test_reference_parity.py, skipped if absent).
 mlxtend>=0.23
 
-# Distributed reference architecture (src/mba/scaling/spark_fpgrowth.py).
-# Requires a working JVM (Java 8/11/17).
+# Distributed FP-Growth (src/mba/scaling/spark_fpgrowth.py), cross-validated
+# against the single-node miner by tests/test_spark_parity.py (skipped if
+# absent). Needs a working JVM: Java 8/11/17 for Spark 3.x, Java 17/21 for
+# Spark 4.x. On Debian/Ubuntu install it inside a virtualenv — the distro's
+# patched setuptools fails the source build with "AttributeError: install_layout".
 pyspark>=3.4
