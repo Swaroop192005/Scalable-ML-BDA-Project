@@ -24,7 +24,7 @@ Analytics* course.
 | **Prediction** | A rule-driven recommender scored on a **held-out future** — temporal split, leave-one-out, against popularity / co-occurrence / random baselines |
 | **Analytics** | EDA, NetworkX co-occurrence networks with community detection, per-country mining, RFM customer segmentation, temporal rule drift, automated insight generation |
 | **Statistics** | Six interestingness metrics, a seven-check quality triage, and Benjamini-Hochberg FDR correction across the whole rules table |
-| **Delivery** | A CLI that runs the whole thing, an 11-tab Streamlit dashboard that re-mines live, and a written report bundle |
+| **Delivery** | A CLI that runs the whole thing, a 12-tab Streamlit dashboard that re-mines live, and a written report bundle |
 
 ---
 
@@ -329,10 +329,17 @@ reach 5.3× lift and do not clear the global threshold at all.
 mba dashboard
 ```
 
-Eleven tabs — Overview, Rules, Network, Regions, Recommender, Segments,
-Drift, Benchmark, Streaming, Insights, Data quality. Every control
+Twelve tabs — Overview, Rules, Network, Regions, Recommender, Live cart,
+Segments, Drift, Benchmark, Streaming, Insights, Data quality. Every control
 **re-runs the miner**; nothing is filtered from a
-precomputed table. Streamlit caches on the parameter set, so a threshold you
+precomputed table.
+
+**Live cart** is the rules put to work rather than measured: add products and
+the basket is re-scored on every change, with each suggestion carrying the
+rule that produced it — the antecedent that fired, its confidence and its
+lift. When no rule covers the basket the card says so and falls back to
+popularity, because a recommender that hides its own blind spots is harder to
+trust than one that admits them. Streamlit caches on the parameter set, so a threshold you
 have already visited returns instantly while a new one actually re-mines.
 
 ![Network tab](docs/images/dashboard_network.png)

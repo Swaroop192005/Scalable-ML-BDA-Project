@@ -459,7 +459,7 @@ metric_cards([
 
 tabs = st.tabs([
     "📊 Overview", "🔗 Rules", "🕸️ Network", "🌍 Regions",
-    "🎯 Recommender", "👥 Segments", "📈 Drift",
+    "🎯 Recommender", "🛒 Live cart", "👥 Segments", "📈 Drift",
     "⚡ Benchmark", "🌊 Streaming", "💡 Insights", "🧾 Data quality",
 ])
 
@@ -709,8 +709,120 @@ with tabs[4]:
             "than raw co-occurrence does."
         )
 
-# -- Segments ------------------------------------------------------------
+# -- Live cart -----------------------------------------------------------
+@st.cache_resource(show_spinner="Fitting the recommender…")
+def cart_engine(support: float):
+    """Fit the association recommender once and keep it between reruns.
+
+    ``cache_resource`` rather than ``cache_data`` because the fitted model is
+    a live object with an internal rule index, not a serialisable frame.
+    """
+    from mba.data.basket import transactions_from_frame
+    from mba.recommend.engine import AssociationRecommender
+
+    frame = load_clean()
+    transactions = list(
+        transactions_from_frame(
+            frame, cfg["schema"]["invoice_col"], cfg["schema"]["item_col"]
+        )
+    )
+    model = AssociationRecommender(
+        mine_kwargs={"min_support": support, "max_len": 3}
+    ).fit(transactions)
+    return model, sorted({item for basket in transactions for item in basket})
+
+
 with tabs[5]:
+    st.caption(
+        "The rules, used the way a shop would use them. Add products and the "
+        "basket is re-scored on every change — every rule whose left-hand side "
+        "is already in the cart fires and votes for its right-hand side."
+    )
+
+    cart_support = st.select_slider(
+        "Rule-mining support", options=[0.003, 0.005, 0.01, 0.02], value=0.005,
+        help="Lower support mines more rules, so the cart can say something "
+             "about more products — at the cost of weaker evidence per rule.",
+    )
+    model, catalogue = cart_engine(cart_support)
+    st.caption(f"{model.n_rules:,} rules indexed, mined from the full transaction history.")
+
+    if "cart" not in st.session_state:
+        st.session_state.cart = []
+
+    picked = st.selectbox(
+        "Add a product", [""] + catalogue, index=0,
+        help="Type to search the full catalogue.",
+    )
+    add, clear, demo = st.columns([1, 1, 2])
+    with add:
+        if st.button("Add to cart", type="primary", disabled=not picked):
+            if picked not in st.session_state.cart:
+                st.session_state.cart.append(picked)
+            st.rerun()
+    with clear:
+        if st.button("Empty cart", disabled=not st.session_state.cart):
+            st.session_state.cart = []
+            st.rerun()
+    with demo:
+        if st.button("Load a demo basket"):
+            st.session_state.cart = [
+                "JUMBO BAG PINK POLKADOT", "JUMBO STORAGE BAG SUKI",
+            ]
+            st.rerun()
+
+    if not st.session_state.cart:
+        st.info("The cart is empty. Add a product, or load the demo basket.")
+    else:
+        basket_col, suggest_col = st.columns([1, 2])
+
+        with basket_col:
+            st.subheader(f"Cart ({len(st.session_state.cart)})")
+            for position, item in enumerate(st.session_state.cart):
+                row, remove = st.columns([5, 1])
+                row.write(item.title())
+                if remove.button("✕", key=f"rm{position}", help="Remove"):
+                    st.session_state.cart.pop(position)
+                    st.rerun()
+
+        with suggest_col:
+            st.subheader("Suggested next")
+            suggestions = model.explain(st.session_state.cart, k=5)
+
+            if suggestions.empty:
+                st.warning("No rule covers this basket.")
+            else:
+                for row in suggestions.itertuples():
+                    rule = model.top_rule_for(st.session_state.cart, row.item)
+                    with st.container(border=True):
+                        head, score = st.columns([4, 1])
+                        head.markdown(f"**{row.item.title()}**")
+                        score.metric("score", f"{row.score:.2f}", label_visibility="collapsed")
+
+                        if row.from_fallback or rule is None:
+                            st.caption(
+                                "⚠️ No rule covers this — filling the slot with a "
+                                f"popular item ({row.popularity:.1%} of baskets). "
+                                "This is the recommender admitting it has run out "
+                                "of evidence."
+                            )
+                        else:
+                            antecedent, confidence, lift = rule
+                            because = ", ".join(sorted(a.title() for a in antecedent))
+                            st.caption(
+                                f"Because the cart has **{because}** — "
+                                f"{confidence:.0%} of such baskets also contain this, "
+                                f"**{lift:.1f}×** more often than chance."
+                            )
+
+                st.caption(
+                    "Scores sum confidence × log(lift) over every rule that fired, "
+                    "so an item several rules agree on outranks one backed by a "
+                    "single strong rule."
+                )
+
+# -- Segments ------------------------------------------------------------
+with tabs[6]:
     st.caption(
         "A wholesale buyer and a one-time gift buyer are both 'customers'. "
         "Pooled, their rules average into something describing neither. "
@@ -772,7 +884,7 @@ with tabs[5]:
             st.dataframe(segment_rules, **FULL_WIDTH, hide_index=True)
 
 # -- Drift ---------------------------------------------------------------
-with tabs[6]:
+with tabs[7]:
     st.caption(
         "A rule mined over a whole year states that an association held *on "
         "average*. That hides the difference between a stable product fact and "
@@ -852,7 +964,7 @@ with tabs[6]:
             )
 
 # -- Benchmark -----------------------------------------------------------
-with tabs[7]:
+with tabs[8]:
     st.caption(
         "Both algorithms return identical itemsets, so this is purely about "
         "cost. Apriori pays for candidate generation, which explodes as support "
@@ -918,7 +1030,7 @@ with tabs[7]:
         )
 
 # -- Streaming -----------------------------------------------------------
-with tabs[8]:
+with tabs[9]:
     st.caption(
         "Every other miner here assumes the data is finite and re-readable. "
         "A live checkout feed is neither. Lossy Counting trades a *bounded, "
@@ -982,7 +1094,7 @@ with tabs[8]:
             st.dataframe(frame.head(30), **FULL_WIDTH, hide_index=True)
 
 # -- Insights ------------------------------------------------------------
-with tabs[9]:
+with tabs[10]:
     insights = generate_insights(
         rules, cfg, frame=frame, n_transactions=basket.n_transactions,
         graph_summary=graph_summary(network_for(country, 34, 1.5)[0]),
@@ -1002,7 +1114,7 @@ with tabs[9]:
                 )
 
 # -- Data quality --------------------------------------------------------
-with tabs[10]:
+with tabs[11]:
     st.subheader("Rule quality triage")
     if flags is not None:
         st.write(flags.summary())

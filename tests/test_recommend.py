@@ -276,3 +276,58 @@ def test_items_unseen_in_training_are_excluded(learnable_transactions):
         build_recommender("popularity"), learnable_transactions, test, k=5
     )
     assert result.n_test_baskets == 0
+
+
+# ------------------------------------------------- explaining a recommendation
+def test_top_rule_for_names_the_rule_behind_a_recommendation(learnable_transactions):
+    model = AssociationRecommender().fit(learnable_transactions)
+    [suggestion] = model.recommend(["bread"], k=1)
+
+    rule = model.top_rule_for(["bread"], suggestion)
+
+    assert rule is not None, "a rule fired, so one must be attributable"
+    antecedent, confidence, lift = rule
+    assert antecedent <= {"bread"}
+    assert 0.0 < confidence <= 1.0
+    assert lift > 1.0
+
+
+def test_top_rule_for_returns_none_when_no_rule_fired(learnable_transactions):
+    """A popularity top-up is not evidence, and must not be dressed up as one."""
+    model = AssociationRecommender().fit(learnable_transactions)
+    assert model.top_rule_for(["bread"], "nothing-like-this-exists") is None
+
+
+def test_explanation_prefers_the_rule_that_drove_the_score():
+    """The explanation must match the scorer, not just pick the biggest lift.
+
+    A specific two-item rule can carry a recommendation while a rare
+    single-item rule posts a higher lift. Explaining the latter would point
+    the reader at evidence that did not do the work.
+    """
+    transactions = (
+        [["a", "b", "target"]] * 200          # specific, high confidence
+        + [["a", "b"]] * 50
+        + [["a", "rare", "target"]] * 3       # high lift, almost never fires
+        + [["rare"]] * 2
+        + [["filler"]] * 400
+    )
+    model = AssociationRecommender().fit(transactions)
+
+    rule = model.top_rule_for(["a", "b"], "target")
+    assert rule is not None
+    antecedent, confidence, _ = rule
+
+    assert antecedent == frozenset({"a", "b"}), (
+        f"expected the two-item rule that carried the score, got {set(antecedent)}"
+    )
+    assert confidence > 0.7
+
+
+def test_contribution_matches_the_scoring_strategy(learnable_transactions):
+    """`max_confidence` ignores lift, so the contribution must too."""
+    model = AssociationRecommender(strategy="max_confidence").fit(learnable_transactions)
+    assert model._contribution(0.5, 99.0, 3) == pytest.approx(0.5)
+
+    weighted = AssociationRecommender(strategy="weighted").fit(learnable_transactions)
+    assert weighted._contribution(0.5, 99.0, 1) > weighted._contribution(0.5, 2.0, 1)

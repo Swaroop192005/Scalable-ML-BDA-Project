@@ -340,6 +340,54 @@ class AssociationRecommender(Recommender):
         log.info("%s indexed %s rules over %s items",
                  self.name, f"{self.n_rules:,}", f"{len(self._index):,}")
 
+    def top_rule_for(
+        self, basket: Iterable[str], item: str
+    ) -> tuple[frozenset[str], float, float] | None:
+        """The strongest rule that recommends *item* for *basket*.
+
+        :meth:`recommend` aggregates every rule that fires, which is the right
+        way to rank but leaves the result unexplainable. This returns the
+        single highest-lift contributing rule as
+        ``(antecedent, confidence, lift)``, so a caller can say *why* an item
+        was suggested. ``None`` when no rule fired — the caller is then looking
+        at a popularity fallback rather than evidence.
+        """
+        basket_set = frozenset(basket)
+        best: tuple[frozenset[str], float, float] | None = None
+        best_contribution = -1.0
+        seen: set[tuple[frozenset, frozenset]] = set()
+
+        for member in basket_set:
+            for antecedent, consequents, confidence, lift in self._index.get(member, ()):
+                if item not in consequents or not antecedent <= basket_set:
+                    continue
+                key = (antecedent, consequents)
+                if key in seen:
+                    continue
+                seen.add(key)
+
+                # Rank by what the rule actually contributed to the score, not
+                # by lift alone. A rare single-item rule can out-lift the
+                # specific multi-item rule that did the real work, and
+                # explaining the wrong one is worse than not explaining.
+                contribution = self._contribution(confidence, lift, len(antecedent))
+                if contribution > best_contribution:
+                    best_contribution = contribution
+                    best = (antecedent, confidence, lift)
+        return best
+
+    def _contribution(self, confidence: float, lift: float, antecedent_len: int) -> float:
+        """One rule's share of a consequent's score, per the active strategy."""
+        if self.strategy == "max_confidence":
+            return confidence
+        weight = antecedent_len ** self.specificity_weight
+        if self.strategy == "confidence":
+            return confidence * weight
+        if self.strategy != "weighted":
+            raise ValueError(f"unknown strategy: {self.strategy!r}")
+        return confidence * float(np.log(max(lift, 1.0 + 1e-9))) * weight
+
+
     def _score(self, basket: set[str]) -> dict[str, float]:
         if not self._index:
             return {}
@@ -356,17 +404,9 @@ class AssociationRecommender(Recommender):
                     continue  # a multi-item antecedent is reached once per item
                 seen.add(key)
 
-                # Longer antecedents are more specific evidence.
-                weight = len(antecedent) ** self.specificity_weight
-
-                if self.strategy == "weighted":
-                    value = confidence * np.log(max(lift, 1.0 + 1e-9)) * weight
-                elif self.strategy == "confidence":
-                    value = confidence * weight
-                elif self.strategy == "max_confidence":
-                    value = confidence
-                else:
-                    raise ValueError(f"unknown strategy: {self.strategy!r}")
+                # Longer antecedents are more specific evidence; the weighting
+                # lives in _contribution so scoring and explanation cannot drift.
+                value = self._contribution(confidence, lift, len(antecedent))
 
                 for consequent in consequents:
                     if consequent in basket:
