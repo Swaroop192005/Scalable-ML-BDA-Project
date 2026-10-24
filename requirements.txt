@@ -12,9 +12,8 @@ tqdm>=4.65
 networkx>=3.0
 
 # Visualisation
-matplotlib>=3.7
-seaborn>=0.12
-plotly>=5.14
+matplotlib>=3.7          # static report figures
+plotly>=5.14             # interactive dashboard charts
 
 # Dashboard
 streamlit>=1.28
